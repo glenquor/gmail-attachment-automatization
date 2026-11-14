@@ -1,0 +1,19 @@
+
+# Credentials
+gmail_cred.xml
+*.cred
+*.credentials
+
+# Downloaded libraries
+libs/
+
+# Downloaded invoices
+*.pdf
+*.xml
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak

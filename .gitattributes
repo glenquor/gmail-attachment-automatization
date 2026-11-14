@@ -1,0 +1,5 @@
+# PowerShell scripts: LF
+*.ps1 text eol=lf
+
+# Windows batch files: CRLF
+*.bat text eol=crlf

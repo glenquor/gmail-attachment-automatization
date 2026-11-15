@@ -1,135 +1,173 @@
-﻿# ============================================================================
+﻿
+# ============================================================================
 # setup-libraries.ps1
 #
-# Run this ONCE to download the required MailKit/MimeKit libraries.
-#
-# This script downloads only the explicitly specified NuGet packages from
-# nuget.org and extracts the required DLLs into .\libs.
+# Resolves and downloads MailKit, MimeKit and all transitive dependencies.
+# Requires PowerShell 7.4+ and the .NET 8 SDK or later.
 # ============================================================================
 
 $ErrorActionPreference = "Stop"
 
-$projectPath = $PSScriptRoot
-$libPath     = Join-Path $projectPath "libs"
+# ---------------------------------------------------------------------------
+# Validate PowerShell
+# ---------------------------------------------------------------------------
+
+if ($PSVersionTable.PSVersion -lt [version]"7.4") {
+    throw "PowerShell 7.4 or later is required."
+}
+
+# ---------------------------------------------------------------------------
+# Validate .NET SDK
+# ---------------------------------------------------------------------------
+
+$dotnet = Get-Command "dotnet" -ErrorAction SilentlyContinue
+
+if (-not $dotnet) {
+    throw "The .NET SDK is required. Install it from https://dotnet.microsoft.com/download"
+}
+
+$sdks = & dotnet --list-sdks
+
+if ($LASTEXITCODE -ne 0 -or -not $sdks) {
+    throw "No .NET SDK was found. Install the .NET 8 SDK or later."
+}
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Fixed versions
-$packages = @(
-    @{
-        Name    = "MailKit"
-        Version = "4.18.2"
-    },
-    @{
-        Name    = "MimeKit"
-        Version = "4.18.2"
+$projectPath = $PSScriptRoot
+$libPath = Join-Path $projectPath "libs"
+
+$tempPath = Join-Path `
+    ([System.IO.Path]::GetTempPath()) `
+    ([guid]::NewGuid().ToString())
+
+$publishPath = Join-Path $tempPath "publish"
+
+$packageVersion = "4.18.2"
+
+# ---------------------------------------------------------------------------
+# Prepare temporary project
+# ---------------------------------------------------------------------------
+
+try {
+
+    New-Item -ItemType Directory -Path $tempPath -Force |
+        Out-Null
+
+    $projectFile = Join-Path $tempPath "DependencyBootstrap.csproj"
+    $programFile = Join-Path $tempPath "Program.cs"
+
+    $projectContent = @"
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MailKit" Version="$packageVersion" />
+    <PackageReference Include="MimeKit" Version="$packageVersion" />
+  </ItemGroup>
+
+</Project>
+"@
+
+    Set-Content -Path $projectFile -Value $projectContent -Encoding utf8
+
+    Set-Content `
+        -Path $programFile `
+        -Value 'Console.WriteLine("Dependencies restored.");' `
+        -Encoding utf8
+
+    # -----------------------------------------------------------------------
+    # Restore and publish
+    # -----------------------------------------------------------------------
+
+    Write-Host ""
+    Write-Host "Resolviendo dependencias NuGet..." -ForegroundColor Cyan
+
+    & dotnet publish $projectFile `
+        --configuration Release `
+        --framework net8.0 `
+        --output $publishPath `
+        --verbosity minimal
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "NuGet restore or publishing failed."
     }
-)
 
-# ---------------------------------------------------------------------------
-# Prepare directory
-# ---------------------------------------------------------------------------
+    # -----------------------------------------------------------------------
+    # Validate published assemblies
+    # -----------------------------------------------------------------------
 
-if (-not (Test-Path $libPath)) {
-    New-Item -ItemType Directory -Path $libPath -Force | Out-Null
-}
+    $requiredDlls = @(
+        "MailKit.dll",
+        "MimeKit.dll"
+    )
 
-Write-Host ""
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host " Setup de librerías MailKit/MimeKit" -ForegroundColor Cyan
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host ""
+    foreach ($dllName in $requiredDlls) {
 
-# TLS 1.2
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $dllPath = Join-Path $publishPath $dllName
 
-foreach ($package in $packages) {
+        if (-not (Test-Path $dllPath -PathType Leaf)) {
+            throw "Required assembly not found: $dllName"
+        }
+    }
 
-    $name    = $package.Name
-    $version = $package.Version
+    # -----------------------------------------------------------------------
+    # Copy dependencies
+    # -----------------------------------------------------------------------
 
-    $zipFile       = Join-Path $libPath "$name-$version.zip"
-    $extractPath   = Join-Path $libPath "_$name-$version"
-    $downloadUrl   = "https://www.nuget.org/api/v2/package/$name/$version"
-
-    Write-Host "Paquete: $name $version" -ForegroundColor Yellow
-    Write-Host "URL:     $downloadUrl"
-
-    try {
-        Write-Host "Descargando..." -ForegroundColor Cyan
-
-        Invoke-WebRequest `
-            -Uri $downloadUrl `
-            -OutFile $zipFile `
-            -UseBasicParsing
-
-        Write-Host "Descargado exitosamente." -ForegroundColor Green
-
-        if (Test-Path $extractPath) {
-            Remove-Item $extractPath -Recurse -Force
+    $dllFiles = Get-ChildItem `
+        -Path $publishPath `
+        -Filter "*.dll" `
+        -File |
+        Where-Object {
+            $_.Name -ne "DependencyBootstrap.dll"
         }
 
-        Expand-Archive `
-            -Path $zipFile `
-            -DestinationPath $extractPath `
-            -Force
+    if (-not (Test-Path $libPath)) {
+        New-Item -ItemType Directory -Path $libPath -Force |
+            Out-Null
+    }
 
-        # Prefer a modern .NET Standard build.
-        $dll = Get-ChildItem `
-            -Path (Join-Path $extractPath "lib") `
-            -Recurse `
-            -Filter "$name.dll" |
-            Where-Object {
-                $_.DirectoryName -match "netstandard2\.0|netstandard2\.1|net6\.0|net7\.0|net8\.0|net9\.0"
-            } |
-            Select-Object -First 1
+    # Remove previous DLLs only after successful publishing.
+    Get-ChildItem -Path $libPath -Filter "*.dll" -File |
+        Remove-Item -Force
 
-        if (-not $dll) {
-            throw "Could not find $name.dll in the downloaded NuGet package."
-        }
+    foreach ($dll in $dllFiles) {
 
         Copy-Item `
             -Path $dll.FullName `
             -Destination $libPath `
             -Force
-
-        Write-Host "Instalado: $($dll.FullName)" -ForegroundColor Green
-
-        # Clean up
-        Remove-Item $zipFile -Force
-        Remove-Item $extractPath -Recurse -Force
-
-        Write-Host ""
     }
-    catch {
-        Write-Host ""
-        Write-Host "ERROR instalando $name $version" -ForegroundColor Red
-        Write-Host $_.Exception.Message -ForegroundColor Red
 
-        if (Test-Path $zipFile) {
-            Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
-        }
+    Write-Host ""
+    Write-Host "Libraries installed successfully." -ForegroundColor Green
 
-        if (Test-Path $extractPath) {
-            Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
-        }
+    Get-ChildItem $libPath -Filter "*.dll" |
+        Select-Object Name, Length |
+        Format-Table -AutoSize
 
-        exit 1
+}
+catch {
+
+    Write-Host ""
+    Write-Host "ERROR installing libraries:" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+
+    exit 1
+
+}
+finally {
+
+    if (Test-Path $tempPath) {
+        Remove-Item $tempPath -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
-
-Write-Host "============================================================" -ForegroundColor Green
-Write-Host " Las librarías se instalaron correctamente." -ForegroundColor Green
-Write-Host " Este archivo no debe ejecutarse nuevamente." -ForegroundColor Green
-Write-Host "============================================================" -ForegroundColor Green
-Write-Host ""
-
-Get-ChildItem $libPath -Filter "*.dll" |
-    Select-Object Name, Length |
-    Format-Table -AutoSize
-
-Write-Host ""
-Write-Host "La automatización de descarga de correos no descargará estas librerías de nuevo." -ForegroundColor Cyan
-Write-Host ""

@@ -1,5 +1,5 @@
 ﻿# ============================================================================
-# gmail-download.ps1
+# descargar_facturas_gmail.ps1
 #
 # Downloads PDF/XML attachments from specific Gmail labels for a selected
 # month and year.
@@ -25,6 +25,34 @@
 # https://github.com/PowerShell/PowerShell/releases/tag/v7.7.0
 # ============================================================================
 
+# ============================================================================
+# Setup before running:
+#
+# Steps to follow in our Gmail accountant account to prepare for this script:
+# 1. Create a Gmail password in your Google account settings (App Passwords).
+# 2. Run the following command to create a credential file:
+# 3. Get-Credential | Export-Clixml -Path 'gmail_cred.xml'
+# 4. Create the labels with the filtering in Gmail for each client, e.g. "Facturas/Glen".
+#   - Create parent label "Facturas" first, then create sub-labels for each client:
+#       - The filter should include "To: <client email>", "Has attachment" checked and "Has the words 'filename:xml filename:pdf'".
+#       - After clicking "Create filter", check "Apply the label" and create the new label using client's name (The sub-label name must match the client name in the $clients array below).
+#       - Check "Nest label under: Facturas", select the parent label and click on "Create".
+# 5. Check the filter in Settings > Filters and Blocked Addresses to ensure if it was created correctly with the Apply label option.
+#
+# Steps to follow in client's Gmail account to prepare for this script:
+# 1. Go to Settings > See all settings > Forwarding and POP/IMAP and enable IMAP access.
+# 2. In Forwarding section, click on "Add a forwarding address" and add your Gmail accountant address.
+# 3. Type the Gmail accountant address and click "Next".
+# 4. It's going to ask to verify yourself, and then click on Proceed.
+# 5. A confirmation link will be sent to the Gmail accountant address. Open the email and click on the link, then click on "Confirm".
+# 6. In the client's Gmail account, create a filter with the following criteria:
+#   - Check "Has attachment" and "Has the words 'filename:xml filename:pdf'".
+#   - Click on "Create filter" and check "Forward it to" and select the Gmail accountant address.
+#   - Click on "Create filter" to save the filter.
+#   - It's going to ask to verify yourself.
+#   - Once it's done, the Gmail accountant will receive the emails with the attachments from the client.
+# ============================================================================
+
 $ErrorActionPreference = "Stop"
 
 # ============================================================================
@@ -35,6 +63,7 @@ $projectPath = $PSScriptRoot
 
 $credPath = Join-Path $projectPath "gmail_cred.xml"
 $libPath  = Join-Path $projectPath "libs"
+$logsDir  = Join-Path $projectPath "logs"
 
 # Where the downloaded invoices will be stored.
 $outputRoot = $env:SystemDrive
@@ -70,6 +99,25 @@ $months = @{
 }
 
 # ============================================================================
+# Helper: create folder
+# ============================================================================
+
+function New-Folder {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path $Path -PathType Container)) {
+        New-Item `
+            -ItemType Directory `
+            -Path $Path `
+            -Force |
+            Out-Null
+    }
+}
+
+# ============================================================================
 # Helper: validated integer input
 # ============================================================================
 
@@ -102,547 +150,525 @@ function Get-ValidInteger {
 }
 
 # ============================================================================
-# Helper: create folder
+# Start Logging (Transcript)
 # ============================================================================
 
-function Ensure-Folder {
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
+New-Folder -Path $logsDir
+$timestamp = Get-Date -Format "dd-MM-yyyy_HH-mm-ss"
+$logFilePath = Join-Path $logsDir "descarga_de_facturas_$timestamp.log"
 
-    if (-not (Test-Path $Path -PathType Container)) {
-        New-Item `
-            -ItemType Directory `
-            -Path $Path `
-            -Force |
-            Out-Null
+# Inicia la grabación de todo lo que ocurra en consola
+Start-Transcript -Path $logFilePath -Append | Out-Null
+
+try {
+    # ============================================================================
+    # Header
+    # ============================================================================
+
+    # Cleans the console
+    Clear-Host
+
+    Write-Host ""
+    Write-Host "-----------------------------------------------------------------------------------" -ForegroundColor Cyan
+    Write-Host " Automatización de descarga de facturas desde Gmail" -ForegroundColor Cyan
+    Write-Host "-----------------------------------------------------------------------------------" -ForegroundColor Cyan
+    Write-Host ""
+
+    # ============================================================================
+    # Ask for year/month
+    # ============================================================================
+
+    # First check the PowerShell version to ensure compatibility with the script.
+    if ($PSVersionTable.PSVersion.Major -lt 7) {
+        Write-Host "ERROR: Version incompatible de PowerShell." -ForegroundColor Red
+        Write-Host "Version actual: PowerShell $($PSVersionTable.PSVersion)" -ForegroundColor Yellow
+        Write-Host "Version requerida: PowerShell 7 o mayor." -ForegroundColor Yellow
+        Write-Host "Por favor ejecuta este script usando: 'pwsh'." -ForegroundColor Yellow
+        Write-Host "Si el error continua, instala la version de PowerShell 7 o mayor.`n" -ForegroundColor Yellow
+        exit 1
     }
-}
 
-# ============================================================================
-# Header
-# ============================================================================
+    $year = Get-ValidInteger `
+        -PromptMessage "Ingrese el año" `
+        -Min 2000 `
+        -Max 2050 `
+        -RangeHint "que esté en el rango que va desde 2000 a 2050"
 
-# Cleans the console
-clear
+    $month = Get-ValidInteger `
+        -PromptMessage "Ingrese el número del mes" `
+        -Min 1 `
+        -Max 12 `
+        -RangeHint "que represente un mes entre 1 y 12"
 
-Write-Host ""
-Write-Host "-----------------------------------------------------------------------------------" -ForegroundColor Cyan
-Write-Host " Automatización de descarga de facturas desde Gmail" -ForegroundColor Cyan
-Write-Host "-----------------------------------------------------------------------------------" -ForegroundColor Cyan
-Write-Host ""
+    $monthName = $months[$month]
 
-# ============================================================================
-# Ask for year/month
-# ============================================================================
+    # ============================================================================
+    # Calculate exact date range
+    # ============================================================================
 
-# First check the PowerShell version to ensure compatibility with the script.
-if ($PSVersionTable.PSVersion.Major -lt 7) {
-    Write-Host "ERROR: Version incompatible de PowerShell." -ForegroundColor Red
-    Write-Host "Version actual: PowerShell $($PSVersionTable.PSVersion)" -ForegroundColor Yellow
-    Write-Host "Version requerida: PowerShell 7 o mayor." -ForegroundColor Yellow
-    Write-Host "Por favor ejecuta este script usando: 'pwsh'." -ForegroundColor Yellow
-    Write-Host "Si el error continua, instala la version de PowerShell 7 o mayor.`n" -ForegroundColor Yellow
-    exit 1
-}
+    $startDate = Get-Date `
+        -Year $year `
+        -Month $month `
+        -Day 1 `
+        -Hour 0 `
+        -Minute 0 `
+        -Second 0 `
+        -Millisecond 0
 
-$year = Get-ValidInteger `
-    -PromptMessage "Ingrese el año" `
-    -Min 2000 `
-    -Max 2050 `
-    -RangeHint "que esté en el rango que va desde 2000 a 2050"
+    $endDate = $startDate.AddMonths(1)
 
-$month = Get-ValidInteger `
-    -PromptMessage "Ingrese el número del mes" `
-    -Min 1 `
-    -Max 12 `
-    -RangeHint "que represente un mes entre 1 y 12"
-
-$monthName = $months[$month]
-
-# ============================================================================
-# Calculate exact date range
-# ============================================================================
-
-$startDate = Get-Date `
-    -Year $year `
-    -Month $month `
-    -Day 1 `
-    -Hour 0 `
-    -Minute 0 `
-    -Second 0 `
-    -Millisecond 0
-
-$endDate = $startDate.AddMonths(1)
-
-Write-Host ""
-Write-Host "Procesando: $monthName $year" -ForegroundColor Cyan
-Write-Host "Desde:      $($startDate.ToString('yyyy-MM-dd HH:mm:ss'))"
-Write-Host "Hasta:      $($endDate.ToString('yyyy-MM-dd HH:mm:ss'))"
-Write-Host ""
-
-# ============================================================================
-# Validate credential file
-# ============================================================================
-
-if (-not (Test-Path $credPath -PathType Leaf)) {
-    Write-Host "ERROR: No se encontró el archivo de credenciales:" -ForegroundColor Red
-    Write-Host $credPath -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Procesando: $monthName $year" -ForegroundColor Cyan
+    Write-Host "Desde:      $($startDate.ToString('yyyy-MM-dd HH:mm:ss'))"
+    Write-Host "Hasta:      $($endDate.ToString('yyyy-MM-dd HH:mm:ss'))"
     Write-Host ""
 
-    Write-Host "Créalo una sola vez con:" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "Get-Credential | Export-Clixml -Path '$credPath'"
-    Write-Host ""
+    # ============================================================================
+    # Validate credential file
+    # ============================================================================
 
-    exit 1
-}
+    if (-not (Test-Path $credPath -PathType Leaf)) {
+        Write-Host "ERROR: No se encontró el archivo de credenciales:" -ForegroundColor Red
+        Write-Host $credPath -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "Créalo una sola vez con:" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "Get-Credential | Export-Clixml -Path '$credPath'"
+        Write-Host ""
+        exit 1
+    }
 
-# ============================================================================
-# Validate libraries
-# ============================================================================
+    # ============================================================================
+    # Validate libraries
+    # ============================================================================
 
-$mailKitDll = Join-Path $libPath "MailKit.dll"
-$mimeKitDll = Join-Path $libPath "MimeKit.dll"
+    $mailKitDll = Join-Path $libPath "MailKit.dll"
+    $mimeKitDll = Join-Path $libPath "MimeKit.dll"
 
-if (-not (Test-Path $mailKitDll -PathType Leaf)) {
-    Write-Host "ERROR: No se encontró la libraría MailKit.dll:" -ForegroundColor Red
-    Write-Host $mailKitDll -ForegroundColor Yellow
-    Write-Host ""
+    if (-not (Test-Path $mailKitDll -PathType Leaf)) {
+        Write-Host "ERROR: No se encontró la libraría MailKit.dll:" -ForegroundColor Red
+        Write-Host $mailKitDll -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "Ejecute primero el archivo 'setup-libraries.ps1'." -ForegroundColor Yellow
+        Write-Host ""
+        exit 1
+    }
 
-    Write-Host "Ejecute primero el archivo 'setup-libraries.ps1'." -ForegroundColor Yellow
-    Write-Host ""
-    exit 1
-}
+    if (-not (Test-Path $mimeKitDll -PathType Leaf)) {
+        Write-Host "ERROR: No se encontró la libraría MimeKit.dll:" -ForegroundColor Red
+        Write-Host $mimeKitDll -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "Ejecute primero el archivo 'setup-libraries.ps1'." -ForegroundColor Yellow
+        Write-Host ""
+        exit 1
+    }
 
-if (-not (Test-Path $mimeKitDll -PathType Leaf)) {
-    Write-Host "ERROR: No se encontró la libraría MimeKit.dll:" -ForegroundColor Red
-    Write-Host $mimeKitDll -ForegroundColor Yellow
-    Write-Host ""
+    # ============================================================================
+    # Load libraries
+    # ============================================================================
 
-    Write-Host "Ejecute primero el archivo 'setup-libraries.ps1'." -ForegroundColor Yellow
-    Write-Host ""
-    exit 1
-}
+    Write-Host "Cargando librerías..." -ForegroundColor Cyan
 
-# ============================================================================
-# Load libraries
-# ============================================================================
-
-Write-Host "Cargando librerías..." -ForegroundColor Cyan
-
-try {
-    # Load all DLLs from the local libs directory.
-    #
-    # IMPORTANT:
-    # These DLLs were installed separately by setup-libraries.ps1.
-    # Nothing is downloaded here.
-
-    Get-ChildItem `
-        -Path $libPath `
-        -Filter "*.dll" |
-        Sort-Object Name |
-        ForEach-Object {
-
-            Write-Host "  Loading $($_.Name)..."
-
-            Add-Type `
-                -Path $_.FullName `
-                -ErrorAction Stop
-        }
-
-}
-catch {
-    Write-Host ""
-    Write-Host "ERROR: No se pudieron cargar las librerías." -ForegroundColor Red
-    Write-Host $_.Exception.Message -ForegroundColor Red
-    exit 1
-}
-
-Write-Host "Librerías cargadas correctamente." -ForegroundColor Green
-Write-Host ""
-
-# ============================================================================
-# Import credentials
-# ============================================================================
-
-try {
-    $credential = Import-Clixml -Path $credPath
-
-    $emailUser = $credential.UserName
-
-    $appPassword = $credential.GetNetworkCredential().Password
-
-    # Remove spaces in case the password was entered with spaces.
-    $appPassword = $appPassword -replace '\s', ''
-}
-catch {
-    Write-Host "ERROR: No se pudieron leer las credenciales." -ForegroundColor Red
-    Write-Host $_.Exception.Message -ForegroundColor Red
-
-    exit 1
-}
-
-# ============================================================================
-# Prepare output directories
-# ============================================================================
-
-$parentFolderName = "111. Contas Yuli $year"
-$parentFolderPath = Join-Path $outputRoot $parentFolderName
-
-Ensure-Folder -Path $parentFolderPath
-
-# ============================================================================
-# Create Gmail IMAP client
-# ============================================================================
-
-$imapClient = [MailKit.Net.Imap.ImapClient]::new()
-
-try {
-
-    # ------------------------------------------------------------------------
-    # Connect
-    # ------------------------------------------------------------------------
-
-    Write-Host "Conectando a Gmail ($emailUser)..." -ForegroundColor Yellow
-
-    # Port 993 + SSL/TLS.
-    $imapClient.Connect(
-        "imap.gmail.com",
-        993,
-        [MailKit.Security.SecureSocketOptions]::SslOnConnect
-    )
-
-    Write-Host "Conexión TLS establecida." -ForegroundColor Green
-
-    # ------------------------------------------------------------------------
-    # Authenticate
-    # ------------------------------------------------------------------------
-
-    $imapClient.Authenticate(
-        $emailUser,
-        $appPassword
-    )
-
-    Write-Host "Autenticación exitosa." -ForegroundColor Green
-    Write-Host ""
-
-    # =========================================================================
-    # Process each client
-    # =========================================================================
-
-    for ($i = 0; $i -lt $clients.Count; $i++) {
-
-        $clientName = $clients[$i]
-
-        Write-Host "[$($i + 1)/$($clients.Count)] => $clientName" `
-            -ForegroundColor Cyan
-
-        # ---------------------------------------------------------------------
-        # Local output folders
-        # ---------------------------------------------------------------------
-
-        $clientFolderPath = Join-Path `
-            $parentFolderPath `
-            $clientName
-
-        $monthFolderName = "$month. $monthName"
-
-        $monthFolderPath = Join-Path `
-            $clientFolderPath `
-            $monthFolderName
-
-        Ensure-Folder -Path $monthFolderPath
-
-        # ---------------------------------------------------------------------
-        # Gmail label
-        # ---------------------------------------------------------------------
-
-        $gmailLabel = "Facturas/$clientName"
-
-        Write-Host "   Gmail label: $gmailLabel"
-
-        # ---------------------------------------------------------------------
-        # Find Gmail folder
-        # ---------------------------------------------------------------------
-
-        try {
-
-            $gmailFolder = $imapClient.GetFolder($gmailLabel)
-
-        }
-        catch {
-
-            Write-Host `
-                "   [!] No se encontró la etiqueta '$gmailLabel'. Saltando..." `
-                -ForegroundColor DarkYellow
-
-            Write-Host ""
-            continue
-        }
-
-        # ---------------------------------------------------------------------
-        # Open folder read-only
-        # ---------------------------------------------------------------------
-
-        try {
-
-            $gmailFolder.Open(
-                [MailKit.FolderAccess]::ReadOnly
-            )
-
-        }
-        catch {
-
-            Write-Host `
-                "   [!] No se pudo abrir '$gmailLabel' en modo lectura." `
-                -ForegroundColor Red
-
-            Write-Host "   $($_.Exception.Message)" `
-                -ForegroundColor Red
-
-            Write-Host ""
-            continue
-        }
-
-        # ---------------------------------------------------------------------
-        # Search messages
-        # ---------------------------------------------------------------------
+    try {
+        # Load all DLLs from the local libs directory.
         #
-        # DeliveredAfter/Before are used only to reduce the amount of mail
-        # retrieved from Gmail.
-        #
-        # We perform a second exact Date check below because the IMAP search
-        # criteria and the message Date can differ around boundaries/time zones.
-        # ---------------------------------------------------------------------
+        # IMPORTANT:
+        # These DLLs were installed separately by setup-libraries.ps1.
+        # Nothing is downloaded here.
 
-        $searchQuery = `
-            [MailKit.Search.SearchQuery]::DeliveredAfter(
-                $startDate.AddDays(-1)
-            ).And(
-                [MailKit.Search.SearchQuery]::DeliveredBefore(
-                    $endDate
-                )
-            )
+        Get-ChildItem `
+            -Path $libPath `
+            -Filter "*.dll" |
+            Sort-Object Name |
+            ForEach-Object {
+                Write-Host "  Loading $($_.Name)..."
+                Add-Type `
+                    -Path $_.FullName `
+                    -ErrorAction Stop
+            }
+    }
+    catch {
+        Write-Host ""
+        Write-Host "ERROR: No se pudieron cargar las librerías." -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Red
+        exit 1
+    }
 
-        try {
-            $messageUids = $gmailFolder.Search($searchQuery)
-        }
-        catch {
-            Write-Host `
-                "   [!] Error buscando mensajes." `
-                -ForegroundColor Red
+    Write-Host "Librerías cargadas correctamente." -ForegroundColor Green
+    Write-Host ""
 
-            Write-Host "   $($_.Exception.Message)" `
-                -ForegroundColor Red
+    # ============================================================================
+    # Import credentials
+    # ============================================================================
 
-            $gmailFolder.Close($false)
+    try {
+        $credential = Import-Clixml -Path $credPath
+        $emailUser = $credential.UserName
+        $appPassword = $credential.GetNetworkCredential().Password
+        # Remove spaces in case the password was entered with spaces.
+        $appPassword = $appPassword -replace '\s', ''
+    }
+    catch {
+        Write-Host "ERROR: No se pudieron leer las credenciales." -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Red
+        exit 1
+    }
 
-            Write-Host ""
-            continue
-        }
+    # ============================================================================
+    # Prepare output directories
+    # ============================================================================
 
-        Write-Host "   Correos encontrados: $($messageUids.Count)"
+    $parentFolderName = "111. Contas Yuli $year"
+    $parentFolderPath = Join-Path $outputRoot $parentFolderName
 
-        $filesSaved = 0
+    New-Folder -Path $parentFolderPath
 
-        # =====================================================================
-        # Process messages
-        # =====================================================================
+    # ============================================================================
+    # Create Gmail IMAP client
+    # ============================================================================
 
-        foreach ($uid in $messageUids) {
+    $imapClient = [MailKit.Net.Imap.ImapClient]::new()
+
+    try {
+        # ------------------------------------------------------------------------
+        # Connect
+        # ------------------------------------------------------------------------
+
+        Write-Host "Conectando a Gmail ($emailUser)..." -ForegroundColor Yellow
+
+        # Port 993 + SSL/TLS.
+        $imapClient.Connect(
+            "imap.gmail.com",
+            993,
+            [MailKit.Security.SecureSocketOptions]::SslOnConnect
+        )
+
+        Write-Host "Conexión TLS establecida." -ForegroundColor Green
+
+        # ------------------------------------------------------------------------
+        # Authenticate
+        # ------------------------------------------------------------------------
+
+        $imapClient.Authenticate(
+            $emailUser,
+            $appPassword
+        )
+
+        Write-Host "Autenticación exitosa." -ForegroundColor Green
+        Write-Host ""
+
+        # =========================================================================
+        # Process each client
+        # =========================================================================
+
+        for ($i = 0; $i -lt $clients.Count; $i++) {
+
+            $clientName = $clients[$i]
+
+            Write-Host "[$($i + 1)/$($clients.Count)] => $clientName" `
+                -ForegroundColor Cyan
+
+            # ---------------------------------------------------------------------
+            # Local output folders
+            # ---------------------------------------------------------------------
+
+            $clientFolderPath = Join-Path `
+                $parentFolderPath `
+                $clientName
+
+            $monthFolderName = "$month. $monthName"
+
+            $monthFolderPath = Join-Path `
+                $clientFolderPath `
+                $monthFolderName
+
+            New-Folder -Path $monthFolderPath
+
+            # ---------------------------------------------------------------------
+            # Gmail label
+            # ---------------------------------------------------------------------
+
+            $gmailLabel = "Facturas/$clientName"
+
+            Write-Host "   Gmail label: $gmailLabel"
+
+            # ---------------------------------------------------------------------
+            # Find Gmail folder
+            # ---------------------------------------------------------------------
+
             try {
-                $message = $gmailFolder.GetMessage($uid)
+                $gmailFolder = $imapClient.GetFolder($gmailLabel)
             }
             catch {
                 Write-Host `
-                    "   [!] No se pudo leer un mensaje. Saltando..." `
+                    "   [!] No se encontró la etiqueta '$gmailLabel'. Saltando..." `
                     -ForegroundColor DarkYellow
 
+                Write-Host ""
                 continue
             }
 
-            # -----------------------------------------------------------------
-            # Exact year/month validation
-            # -----------------------------------------------------------------
+            # ---------------------------------------------------------------------
+            # Open folder read-only
+            # ---------------------------------------------------------------------
 
-            if (
-                $message.Date.Year -ne $year -or
-                $message.Date.Month -ne $month
-            ) {
+            try {
+                $gmailFolder.Open(
+                    [MailKit.FolderAccess]::ReadOnly
+                )
+            }
+            catch {
+                Write-Host `
+                    "   [!] No se pudo abrir '$gmailLabel' en modo lectura." `
+                    -ForegroundColor Red
+
+                Write-Host "   $($_.Exception.Message)" `
+                    -ForegroundColor Red
+
+                Write-Host ""
                 continue
             }
 
-            $datePrefix = $message.Date.ToString("yyyy-MM-dd")
+            # ---------------------------------------------------------------------
+            # Search messages
+            # ---------------------------------------------------------------------
+            #
+            # DeliveredAfter/Before are used only to reduce the amount of mail
+            # retrieved from Gmail.
+            #
+            # We perform a second exact Date check below because the IMAP search
+            # criteria and the message Date can differ around boundaries/time zones.
+            # ---------------------------------------------------------------------
 
-            # -----------------------------------------------------------------
-            # Process attachments
-            # -----------------------------------------------------------------
+            $searchQuery = `
+                [MailKit.Search.SearchQuery]::DeliveredAfter(
+                    $startDate.AddDays(-1)
+                ).And(
+                    [MailKit.Search.SearchQuery]::DeliveredBefore(
+                        $endDate
+                    )
+                )
 
-            foreach ($attachment in $message.Attachments) {
+            try {
+                $messageUids = $gmailFolder.Search($searchQuery)
+            }
+            catch {
+                Write-Host `
+                    "   [!] Error buscando mensajes." `
+                    -ForegroundColor Red
 
-                # Only process actual MIME parts.
-                if ($attachment -isnot [MimeKit.MimePart]) {
+                Write-Host "   $($_.Exception.Message)" `
+                    -ForegroundColor Red
+
+                $gmailFolder.Close($false)
+
+                Write-Host ""
+                continue
+            }
+
+            Write-Host "   Correos encontrados: $($messageUids.Count)"
+
+            $filesSaved = 0
+
+            # =====================================================================
+            # Process messages
+            # =====================================================================
+
+            foreach ($uid in $messageUids) {
+                try {
+                    $message = $gmailFolder.GetMessage($uid)
+                }
+                catch {
+                    Write-Host `
+                        "   [!] No se pudo leer un mensaje. Saltando..." `
+                        -ForegroundColor DarkYellow
+
                     continue
                 }
 
-                $originalFileName = $attachment.FileName
-
-                if ([string]::IsNullOrWhiteSpace($originalFileName)) {
-                    continue
-                }
-
-                # -------------------------------------------------------------
-                # ONLY PDF and XML
-                # -------------------------------------------------------------
+                # -----------------------------------------------------------------
+                # Exact year/month validation
+                # -----------------------------------------------------------------
 
                 if (
-                    $originalFileName -notmatch `
-                    '(?i)\.(pdf|xml)$'
+                    $message.Date.Year -ne $year -or
+                    $message.Date.Month -ne $month
                 ) {
                     continue
                 }
 
-                # -------------------------------------------------------------
-                # Sanitize filename
-                # -------------------------------------------------------------
+                $datePrefix = $message.Date.ToString("yyyy-MM-dd")
 
-                $safeFileName = $originalFileName -replace `
-                    '[\\/:*?"<>|]', '_'
+                # -----------------------------------------------------------------
+                # Process attachments
+                # -----------------------------------------------------------------
 
-                # Prevent strange path-related names.
-                $safeFileName = $safeFileName.Trim()
-
-                if ([string]::IsNullOrWhiteSpace($safeFileName)) {
-                    continue
-                }
-
-                # -------------------------------------------------------------
-                # Final destination
-                # -------------------------------------------------------------
-
-                $destinationFileName = "${datePrefix}_${safeFileName}"
-
-                $destinationPath = Join-Path `
-                    $monthFolderPath `
-                    $destinationFileName
-
-                # -------------------------------------------------------------
-                # Do not overwrite existing files
-                # -------------------------------------------------------------
-
-                if (Test-Path $destinationPath -PathType Leaf) {
-
-                    Write-Host `
-                        "      [=] Ya existe: $destinationFileName" `
-                        -ForegroundColor DarkGray
-
-                    continue
-                }
-
-                # -------------------------------------------------------------
-                # Save attachment
-                # -------------------------------------------------------------
-
-                $fileStream = $null
-
-                try {
-                    $fileStream = [System.IO.File]::Create(
-                        $destinationPath
-                    )
-
-                    $attachment.Content.DecodeTo(
-                        $fileStream
-                    )
-
-                    $filesSaved++
-
-                    Write-Host `
-                        "      [+] $destinationFileName" `
-                        -ForegroundColor Green
-                }
-                catch {
-                    Write-Host `
-                        "      [!] Error guardando '$safeFileName'" `
-                        -ForegroundColor Red
-
-                    Write-Host `
-                        "          $($_.Exception.Message)" `
-                        -ForegroundColor Red
-
-                    # Remove partially-created files.
-                    if (Test-Path $destinationPath -PathType Leaf) {
-                        Remove-Item `
-                            $destinationPath `
-                            -Force `
-                            -ErrorAction SilentlyContinue
+                foreach ($attachment in $message.Attachments) {
+                    # Only process actual MIME parts.
+                    if ($attachment -isnot [MimeKit.MimePart]) {
+                        continue
                     }
-                }
-                finally {
-                    if ($null -ne $fileStream) {
-                        $fileStream.Dispose()
+
+                    $originalFileName = $attachment.FileName
+
+                    if ([string]::IsNullOrWhiteSpace($originalFileName)) {
+                        continue
+                    }
+
+                    # -------------------------------------------------------------
+                    # ONLY PDF and XML
+                    # -------------------------------------------------------------
+
+                    if (
+                        $originalFileName -notmatch `
+                        '(?i)\.(pdf|xml)$'
+                    ) {
+                        continue
+                    }
+
+                    # -------------------------------------------------------------
+                    # Sanitize filename
+                    # -------------------------------------------------------------
+
+                    $safeFileName = $originalFileName -replace `
+                        '[\\/:*?"<>|]', '_'
+
+                    # Prevent strange path-related names.
+                    $safeFileName = $safeFileName.Trim()
+
+                    if ([string]::IsNullOrWhiteSpace($safeFileName)) {
+                        continue
+                    }
+
+                    # -------------------------------------------------------------
+                    # Final destination
+                    # -------------------------------------------------------------
+
+                    $destinationFileName = "${datePrefix}_${safeFileName}"
+
+                    $destinationPath = Join-Path `
+                        $monthFolderPath `
+                        $destinationFileName
+
+                    # -------------------------------------------------------------
+                    # Do not overwrite existing files
+                    # -------------------------------------------------------------
+
+                    if (Test-Path $destinationPath -PathType Leaf) {
+                        Write-Host `
+                            "      [=] Ya existe: $destinationFileName" `
+                            -ForegroundColor DarkGray
+
+                        continue
+                    }
+
+                    # -------------------------------------------------------------
+                    # Save attachment
+                    # -------------------------------------------------------------
+
+                    $fileStream = $null
+
+                    try {
+                        $fileStream = [System.IO.File]::Create(
+                            $destinationPath
+                        )
+
+                        $attachment.Content.DecodeTo(
+                            $fileStream
+                        )
+                        $filesSaved++
+                        Write-Host `
+                            "      [+] $destinationFileName" `
+                            -ForegroundColor Green
+                    }
+                    catch {
+                        Write-Host `
+                            "      [!] Error guardando '$safeFileName'" `
+                            -ForegroundColor Red
+
+                        Write-Host `
+                            "          $($_.Exception.Message)" `
+                            -ForegroundColor Red
+
+                        # Remove partially-created files.
+                        if (Test-Path $destinationPath -PathType Leaf) {
+                            Remove-Item `
+                                $destinationPath `
+                                -Force `
+                                -ErrorAction SilentlyContinue
+                        }
+                    }
+                    finally {
+                        if ($null -ne $fileStream) {
+                            $fileStream.Dispose()
+                        }
                     }
                 }
             }
-        }
 
-        # ---------------------------------------------------------------------
-        # Close folder
-        # ---------------------------------------------------------------------
+            # ---------------------------------------------------------------------
+            # Close folder
+            # ---------------------------------------------------------------------
 
-        try {
-            $gmailFolder.Close($false)
-        }
-        catch {
-            # Nothing critical here; the main connection will be closed later.
-        }
-
-        Write-Host `
-            "   [+] $filesSaved archivos descargados." `
-            -ForegroundColor Green
-
-        Write-Host ""
-    }
-
-}
-catch {
-
-    Write-Host ""
-    Write-Host "============================================================" `
-        -ForegroundColor Red
-
-    Write-Host "ERROR durante el proceso:" `
-        -ForegroundColor Red
-
-    Write-Host $_.Exception.Message `
-        -ForegroundColor Red
-
-    Write-Host "============================================================" `
-        -ForegroundColor Red
-
-}
-finally {
-
-    # =========================================================================
-    # Always disconnect from Gmail
-    # =========================================================================
-
-    if ($null -ne $imapClient) {
-        if ($imapClient.IsConnected) {
             try {
-                $imapClient.Disconnect($true)
+                $gmailFolder.Close($false)
             }
             catch {
-                # Ignore disconnect errors.
+                # Nothing critical here; the main connection will be closed later.
             }
-        }
-        $imapClient.Dispose()
-    }
-}
 
-Write-Host ""
-Write-Host "-----------------------------------------------------------------------------------"
-Write-Host "¡Proceso finalizado!"
-Write-Host "-----------------------------------------------------------------------------------"
-Write-Host ""
+            Write-Host `
+                "   [+] $filesSaved archivos descargados." `
+                -ForegroundColor Green
+
+            Write-Host ""
+        }
+
+    }
+    catch {
+
+        Write-Host ""
+        Write-Host "============================================================" `
+            -ForegroundColor Red
+
+        Write-Host "ERROR durante el proceso:" `
+            -ForegroundColor Red
+
+        Write-Host $_.Exception.Message `
+            -ForegroundColor Red
+
+        Write-Host "============================================================" `
+            -ForegroundColor Red
+
+    }
+    finally {
+
+        # =========================================================================
+        # Always disconnect from Gmail
+        # =========================================================================
+
+        if ($null -ne $imapClient) {
+            if ($imapClient.IsConnected) {
+                try {
+                    $imapClient.Disconnect($true)
+                }
+                catch {
+                    # Ignore disconnect errors.
+                }
+            }
+            $imapClient.Dispose()
+        }
+    }
+
+    Write-Host ""
+    Write-Host "-----------------------------------------------------------------------------------"
+    Write-Host "¡Proceso finalizado!"
+    Write-Host "-----------------------------------------------------------------------------------"
+    Write-Host ""
+}
+finally {
+    # ========================================================================
+    # Stop Logging (Always runs, even if 'exit 1' is called)
+    # ========================================================================
+    Stop-Transcript | Out-Null
+}

@@ -59,11 +59,12 @@ $ErrorActionPreference = "Stop"
 # Configuration
 # ============================================================================
 
-$projectPath = $PSScriptRoot
+$scriptsPath = $PSScriptRoot
+$repoRoot    = Split-Path $scriptsPath -Parent
 
-$credPath = Join-Path $projectPath "gmail_cred.xml"
-$libPath  = Join-Path $projectPath "libs"
-$logsDir  = Join-Path $projectPath "logs"
+$credPath = Join-Path $scriptsPath "gmail_cred.xml"
+$libPath  = Join-Path $scriptsPath "libs"
+$logsDir  = Join-Path $repoRoot "logs"
 
 # Where the downloaded invoices will be stored.
 $outputRoot = $env:SystemDrive
@@ -665,6 +666,10 @@ try {
     Write-Host "¡Proceso finalizado!"
     Write-Host "-----------------------------------------------------------------------------------"
     Write-Host ""
+    
+    # Exportar la ruta generada para que el .bat pueda leerla y abrirla
+    $tempOutputFile = Join-Path $env:TEMP "ultima_ruta_facturas.txt"
+    Set-Content -Path $tempOutputFile -Value $parentFolderPath -Encoding UTF8 -Force
 }
 finally {
     # ========================================================================
